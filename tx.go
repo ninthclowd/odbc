@@ -8,7 +8,7 @@ import (
 	"database/sql/driver"
 	"errors"
 
-	"github.com/alexbrainman/odbc/api"
+	"github.com/ninthclowd/odbc/api"
 )
 
 var ErrTXCompleted = errors.New("transaction already completed")

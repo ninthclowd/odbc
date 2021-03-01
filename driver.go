@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/alexbrainman/odbc/api"
+	"github.com/ninthclowd/odbc/api"
 	"go.uber.org/atomic"
 )
 

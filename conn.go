@@ -9,7 +9,7 @@ import (
 	"database/sql/driver"
 	"strings"
 
-	"github.com/alexbrainman/odbc/api"
+	"github.com/ninthclowd/odbc/api"
 	"go.uber.org/atomic"
 )
 

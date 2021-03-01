@@ -9,7 +9,7 @@ import (
 
 	"go.uber.org/atomic"
 
-	"github.com/alexbrainman/odbc/api"
+	"github.com/ninthclowd/odbc/api"
 )
 
 //implement driver.StmtExecContext

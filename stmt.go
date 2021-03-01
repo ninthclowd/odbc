@@ -9,7 +9,7 @@ import (
 	"database/sql/driver"
 	"errors"
 
-	"github.com/alexbrainman/odbc/api"
+	"github.com/ninthclowd/odbc/api"
 )
 
 // TODO(brainman): see if I could use SQLExecDirect anywhere
