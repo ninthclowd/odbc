@@ -8,31 +8,33 @@ import (
 	"database/sql/driver"
 	"io"
 
-	"github.com/alexbrainman/odbc/api"
+	"github.com/ninthclowd/odbc/api"
 )
 
 type Rows struct {
-	os *ODBCStmt
+	s *Stmt
 }
 
+// implement driver.Rows
 func (r *Rows) Columns() []string {
-	names := make([]string, len(r.os.Cols))
+	names := make([]string, len(r.s.cols))
 	for i := 0; i < len(names); i++ {
-		names[i] = r.os.Cols[i].Name()
+		names[i] = r.s.cols[i].Name()
 	}
 	return names
 }
 
+// implement driver.Rows
 func (r *Rows) Next(dest []driver.Value) error {
-	ret := api.SQLFetch(r.os.h)
+	ret := api.SQLFetch(r.s.h)
 	if ret == api.SQL_NO_DATA {
 		return io.EOF
 	}
 	if IsError(ret) {
-		return NewError("SQLFetch", r.os.h)
+		return NewError("SQLFetch", r.s.h)
 	}
 	for i := range dest {
-		v, err := r.os.Cols[i].Value(r.os.h, i)
+		v, err := r.s.cols[i].Value(r.s.h, i)
 		if err != nil {
 			return err
 		}
@@ -41,24 +43,35 @@ func (r *Rows) Next(dest []driver.Value) error {
 	return nil
 }
 
+// implement driver.Rows
 func (r *Rows) Close() error {
-	return r.os.closeByRows()
+	if r.s.c.closingInBG.Load() {
+		//if we are cancelling/closing in a background thread, ignore requests to Close this statement from the driver
+		return nil
+	}
+	r.s.rows = nil
+	if ret := api.SQLCloseCursor(r.s.h); IsError(ret) {
+		return NewError("SQLCloseCursor", r.s.h)
+	}
+	return nil
 }
 
+// implement driver.RowsNextResultSet
 func (r *Rows) HasNextResultSet() bool {
 	return true
 }
 
+// implement driver.RowsNextResultSet
 func (r *Rows) NextResultSet() error {
-	ret := api.SQLMoreResults(r.os.h)
+	ret := api.SQLMoreResults(r.s.h)
 	if ret == api.SQL_NO_DATA {
 		return io.EOF
 	}
 	if IsError(ret) {
-		return NewError("SQLMoreResults", r.os.h)
+		return NewError("SQLMoreResults", r.s.h)
 	}
 
-	err := r.os.BindColumns()
+	err := r.s.bindColumns()
 	if err != nil {
 		return err
 	}

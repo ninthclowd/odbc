@@ -5,104 +5,112 @@
 package odbc
 
 import (
+	"context"
 	"database/sql/driver"
 	"errors"
-	"sync"
 
-	"github.com/alexbrainman/odbc/api"
+	"github.com/ninthclowd/odbc/api"
 )
+
+// TODO(brainman): see if I could use SQLExecDirect anywhere
 
 type Stmt struct {
 	c     *Conn
 	query string
-	os    *ODBCStmt
-	mu    sync.Mutex
+
+	h          api.SQLHSTMT
+	parameters []Parameter
+	cols       []Column
+
+	//each statement can only have one open rows.  If a second query is executed while rows is still open,
+	//the driver will prepare a new statement to execute on
+	rows *Rows
 }
 
-func (c *Conn) Prepare(query string) (driver.Stmt, error) {
-	if c.bad {
-		return nil, driver.ErrBadConn
-	}
-	os, err := c.PrepareODBCStmt(query)
-	if err != nil {
-		return nil, err
-	}
-	return &Stmt{c: c, os: os, query: query}, nil
-}
-
+// implement driver.Stmt
 func (s *Stmt) NumInput() int {
-	if s.os == nil {
+	if s.parameters == nil {
 		return -1
 	}
-	return len(s.os.Parameters)
+	return len(s.parameters)
 }
 
+// implement driver.Stmt
+// Close closes the statement.
+//
+// As of Go 1.1, a Stmt will not be closed if it's in use
+// by any queries.
 func (s *Stmt) Close() error {
-	if s.os == nil {
-		return errors.New("Stmt is already closed")
+	if s.c.closingInBG.Load() {
+		//if we are cancelling/closing in a background thread, ignore requests to Close this statement from the driver
+		return nil
 	}
-	ret := s.os.closeByStmt()
-	s.os = nil
-	return ret
+	return s.close()
+}
+func (s *Stmt) close() error {
+	return s.releaseHandle()
 }
 
+// implement driver.Stmt - per documentation, not supposed to be used by multiple goroutines
 func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
-	if s.os == nil {
-		return nil, errors.New("Stmt is closed")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.os.usedByRows {
-		s.os.closeByStmt()
-		s.os = nil
-		os, err := s.c.PrepareODBCStmt(s.query)
-		if err != nil {
-			return nil, err
-		}
-		s.os = os
-	}
-	err := s.os.Exec(args, s.c)
-	if err != nil {
-		return nil, err
-	}
-	var sumRowCount int64
-	for {
-		var c api.SQLLEN
-		ret := api.SQLRowCount(s.os.h, &c)
-		if IsError(ret) {
-			return nil, NewError("SQLRowCount", s.os.h)
-		}
-		sumRowCount += int64(c)
-		if ret = api.SQLMoreResults(s.os.h); ret == api.SQL_NO_DATA {
-			break
-		}
-	}
-	return &Result{rowCount: sumRowCount}, nil
+	return s.ExecContext(context.Background(), toNamedValues(args))
 }
 
+// implement driver.Stmt - per documentation, not supposed to be used by multiple goroutines
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
-	if s.os == nil {
-		return nil, errors.New("Stmt is closed")
+	return s.QueryContext(context.Background(), toNamedValues(args))
+}
+
+func (s *Stmt) releaseHandle() error {
+	h := s.h
+	s.h = api.SQLHSTMT(api.SQL_NULL_HSTMT)
+	return releaseHandle(h)
+}
+
+func (s *Stmt) bindColumns() error {
+	// count columns
+	var n api.SQLSMALLINT
+	ret := api.SQLNumResultCols(s.h, &n)
+	if IsError(ret) {
+		return NewError("SQLNumResultCols", s.h)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.os.usedByRows {
-		s.os.closeByStmt()
-		s.os = nil
-		os, err := s.c.PrepareODBCStmt(s.query)
+	if n < 1 {
+		return errors.New("statement did not create a result set")
+	}
+	// fetch column descriptions
+	s.cols = make([]Column, n)
+	binding := true
+	for i := range s.cols {
+		c, err := NewColumn(s.h, i)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		s.os = os
+		s.cols[i] = c
+		// Once we found one non-bindable column, we will not bind the rest.
+		// http://www.easysoft.com/developer/languages/c/odbc-tutorial-fetching-results.html
+		// ... One common restriction is that SQLGetData may only be called on columns after the last bound column. ...
+		if !binding {
+			continue
+		}
+		bound, err := s.cols[i].Bind(s.h, i)
+		if err != nil {
+			return err
+		}
+		if !bound {
+			binding = false
+		}
 	}
-	err := s.os.Exec(args, s.c)
-	if err != nil {
-		return nil, err
+	return nil
+}
+
+func toNamedValues(values []driver.Value) []driver.NamedValue {
+	namedValues := make([]driver.NamedValue, len(values))
+	for idx, value := range values {
+		namedValues[idx] = driver.NamedValue{
+			Name:    "",
+			Ordinal: idx + 1,
+			Value:   value,
+		}
 	}
-	err = s.os.BindColumns()
-	if err != nil {
-		return nil, err
-	}
-	s.os.usedByRows = true // now both Stmt and Rows refer to it
-	return &Rows{os: s.os}, nil
+	return namedValues
 }

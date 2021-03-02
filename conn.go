@@ -5,48 +5,33 @@
 package odbc
 
 import (
+	"context"
 	"database/sql/driver"
 	"strings"
-	"unsafe"
 
-	"github.com/alexbrainman/odbc/api"
+	"github.com/ninthclowd/odbc/api"
+	"go.uber.org/atomic"
 )
 
 type Conn struct {
 	h                api.SQLHDBC
 	tx               *Tx
-	bad              bool
+	bad              *atomic.Bool
+	closingInBG      *atomic.Bool
 	isMSAccessDriver bool
 }
 
 var accessDriverSubstr = strings.ToUpper(strings.Replace("DRIVER={Microsoft Access Driver", " ", "", -1))
 
-func (d *Driver) Open(dsn string) (driver.Conn, error) {
-	if d.initErr != nil {
-		return nil, d.initErr
-	}
-
-	var out api.SQLHANDLE
-	ret := api.SQLAllocHandle(api.SQL_HANDLE_DBC, api.SQLHANDLE(d.h), &out)
-	if IsError(ret) {
-		return nil, NewError("SQLAllocHandle", d.h)
-	}
-	h := api.SQLHDBC(out)
-	drv.Stats.updateHandleCount(api.SQL_HANDLE_DBC, 1)
-
-	b := api.StringToUTF16(dsn)
-	ret = api.SQLDriverConnect(h, 0,
-		(*api.SQLWCHAR)(unsafe.Pointer(&b[0])), api.SQL_NTS,
-		nil, 0, nil, api.SQL_DRIVER_NOPROMPT)
-	if IsError(ret) {
-		defer releaseHandle(h)
-		return nil, NewError("SQLDriverConnect", h)
-	}
-	isAccess := strings.Contains(strings.ToUpper(strings.Replace(dsn, " ", "", -1)), accessDriverSubstr)
-	return &Conn{h: h, isMSAccessDriver: isAccess}, nil
-}
-
+// implement driver.Conn
 func (c *Conn) Close() (err error) {
+	if c.closingInBG.Load() {
+		//if we are cancelling/closing in a background thread, ignore requests to Close this connection from the driver
+		return nil
+	}
+	return c.close()
+}
+func (c *Conn) close() (err error) {
 	if c.tx != nil {
 		c.tx.Rollback()
 	}
@@ -68,7 +53,27 @@ func (c *Conn) Close() (err error) {
 func (c *Conn) newError(apiName string, handle interface{}) error {
 	err := NewError(apiName, handle)
 	if err == driver.ErrBadConn {
-		c.bad = true
+		c.bad.Store(true)
 	}
 	return err
+}
+
+// implement driver.Conn
+func (c *Conn) Prepare(query string) (driver.Stmt, error) {
+	return c.PrepareContext(context.Background(), query)
+}
+
+// implement driver.Conn
+func (c *Conn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
+
+//implement driver.Execer
+func (c *Conn) Exec(query string, args []driver.Value) (driver.Result, error) {
+	return c.ExecContext(context.Background(), query, toNamedValues(args))
+}
+
+//implement driver.Queryer
+func (c *Conn) Query(query string, args []driver.Value) (driver.Rows, error) {
+	return c.QueryContext(context.Background(), query, toNamedValues(args))
 }
